@@ -1,0 +1,183 @@
+# Directory setup for logs
+$logDir = "C:\FirewallLogs"
+$logFile = "$logDir\firewall_block_log.log"
+
+if (-Not (Test-Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory | Out-Null
+    Write-Host "Created log directory at $logDir"
+}
+
+# Initialize IP tracking and block variables
+$ipCounts = @{}
+$blockedIPs = @{}
+$globalBlockThreshold = 200    # Threshold for max connections in 5 minutes
+$individualIPThreshold = 10     # Max connections per IP before blocking
+$blockTimeWindow = [timespan]::FromMinutes(5)
+
+# New thresholds for UDP and DNS flood control
+$udpFloodThreshold = 100        # Max UDP requests allowed per IP in 5 minutes
+$dnsRequestThreshold = 50       # Max DNS requests allowed per IP in 5 minutes
+
+# Advanced detection variables
+$connectionPatterns = @{}       # To track connection patterns
+$patternThreshold = 0.5         # Pattern recognition threshold (50% increase)
+$previousConnectionCount = 0
+
+# Log blocked IPs
+function Log-BlockedIP {
+    param ([string]$ip)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "Blocked IP: $ip at $timestamp"
+    Add-Content -Path $logFile -Value $logEntry
+    Write-Host "Logged blocked IP: $ip"
+}
+
+# Block IP with Windows Defender Firewall
+function Block-IP {
+    param ([string]$ip)
+    if (-Not $blockedIPs.Contains($ip)) {
+        try {
+            New-NetFirewallRule -DisplayName "Blocked $ip" -Direction Inbound -Action Block -RemoteAddress $ip
+            $blockedIPs += $ip
+            Write-Host "Blocked IP: $ip in Windows Firewall"
+        } catch {
+            Write-Host "Error blocking IP: $ip - $_"
+        }
+    }
+}
+
+# Monitor HTTP flood (Layer 7 attacks)
+function Monitor-HTTPFlood {
+    $httpConnections = Get-NetTCPConnection | Where-Object { $_.RemotePort -eq 80 -or $_.RemotePort -eq 443 }
+    foreach ($conn in $httpConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+            
+            if ($ipCounts[$ip] -ge $individualIPThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor UDP flood
+function Monitor-UDPFlood {
+    $udpConnections = Get-NetUDPEndpoint | Where-Object { $_.RemoteAddress -notmatch "^(127|::1|192\.168|10\.)" }
+    foreach ($conn in $udpConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            if ($ipCounts[$ip] -ge $udpFloodThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor DNS amplification flood
+function Monitor-DNSFlood {
+    $dnsConnections = Get-NetTCPConnection | Where-Object { $_.RemotePort -eq 53 }
+    foreach ($conn in $dnsConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            if ($ipCounts[$ip] -ge $dnsRequestThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor and block general connections
+function Monitor-Connections {
+    # Gather incoming connections excluding local addresses
+    $connections = Get-NetTCPConnection | Where-Object { $_.RemoteAddress -notmatch "^(127|::1|192\.168|10\.)" } |
+        Select-Object -ExpandProperty RemoteAddress -Unique
+
+    # Increment IP counts and block as needed
+    foreach ($ip in $connections) {
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            # Block individual IP if threshold exceeded
+            if ($ipCounts[$ip] -eq $individualIPThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+
+    # Activate global block if connections exceed threshold
+    if ($connections.Count -ge $globalBlockThreshold) {
+        Write-Host "High connection count detected. Activating global block."
+        try {
+            New-NetFirewallRule -DisplayName "Global Block - DDoS" -Direction Inbound -Action Block -Enabled True
+            Write-Host "Global block rule added to Windows Firewall"
+        } catch {
+            Write-Host "Error applying global block rule: $_"
+        }
+    }
+
+    # Advanced detection: analyze connection patterns
+    Analyze-ConnectionPatterns -currentCount $connections.Count
+}
+
+# Analyze connection patterns for advanced detection
+function Analyze-ConnectionPatterns {
+    param ([int]$currentCount)
+
+    # Calculate the increase in connections
+    if ($previousConnectionCount -eq 0) {
+        $previousConnectionCount = $currentCount
+        return
+    }
+
+    $increasePercentage = (($currentCount - $previousConnectionCount) / $previousConnectionCount)
+
+    # If the increase percentage exceeds the threshold, consider it a potential attack
+    if ($increasePercentage -ge $patternThreshold) {
+        Write-Host "Potential DDoS attack detected: increase of $([math]::Round($increasePercentage * 100, 2))% in connections."
+        
+        # Log the incident and block all traffic if necessary
+        Log-BlockedIP -ip "Potential attack detected: $increasePercentage"
+        # Optionally, you can block all incoming traffic or apply other measures
+    }
+
+    # Update the previous count for the next iteration
+    $previousConnectionCount = $currentCount
+}
+
+# Main Loop with periodic reset
+$startTime = Get-Date
+while ($true) {
+    Monitor-Connections
+    Monitor-HTTPFlood
+    Monitor-UDPFlood
+    Monitor-DNSFlood
+    Start-Sleep -Seconds 1
+
+    # Reset IP counts every $blockTimeWindow
+    if (((Get-Date) - $startTime) -ge $blockTimeWindow) {
+        Write-Host "Resetting IP counts."
+        $ipCounts.Clear()
+        $startTime = Get-Date
+    }
+}
