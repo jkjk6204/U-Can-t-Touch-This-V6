@@ -1,0 +1,168 @@
+# 🎃 HalloweenV6 Firewall Protector 🎃
+# Setup your defenses against the ghoulish flood of cyber ghosts 👻
+
+# Directory setup for spooky logs
+$logDir = "C:\FirewallLogs"
+$logFile = "$logDir\firewall_block_log.log"
+
+if (-Not (Test-Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory | Out-Null
+    Write-Host "🧛‍♂️ Created eerie log directory at $logDir 🧛‍♂️"
+}
+
+# Initialize IP tracking and block variables to banish unwanted spirits 🕸️
+$ipCounts = @{ }
+$blockedIPs = @{ }
+$globalBlockThreshold = 200    # Ghostly threshold for max connections in 5 minutes
+$individualIPThreshold = 10    # Spooky max connections per IP before haunting them
+$blockTimeWindow = [timespan]::FromMinutes(5)
+
+# Extra defenses against UDP and DNS poltergeists
+$udpFloodThreshold = 100       # Max spooky UDP requests allowed per IP in 5 minutes
+$dnsRequestThreshold = 50      # Max haunting DNS requests allowed per IP in 5 minutes
+
+# Log blocked IPs into our grimoire
+function Log-BlockedIP {
+    param ([string]$ip)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "💀 Blocked IP: $ip at $timestamp 💀"
+    Add-Content -Path $logFile -Value $logEntry
+    Write-Host "🧙‍♀️ Logged blocked IP: $ip 🧙‍♀️"
+}
+
+# Banish IP with Windows Defender Firewall
+function Block-IP {
+    param ([string]$ip)
+    if (-Not $blockedIPs.Contains($ip)) {
+        try {
+            New-NetFirewallRule -DisplayName "Banned $ip 👻" -Direction Inbound -Action Block -RemoteAddress $ip
+            $blockedIPs += $ip
+            Write-Host "🔒 Haunted and blocked IP: $ip in Windows Firewall"
+        } catch {
+            Write-Host "⚠️ Error casting block spell on IP: $ip - $_"
+        }
+    }
+}
+
+# Monitor HTTP flood (Layer 7 attacks) from cyber ghosts
+function Monitor-HTTPFlood {
+    $httpConnections = Get-NetTCPConnection | Where-Object { $_.RemotePort -eq 80 -or $_.RemotePort -eq 443 }
+    foreach ($conn in $httpConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+            
+            if ($ipCounts[$ip] -ge $individualIPThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor UDP flood from malicious spirits
+function Monitor-UDPFlood {
+    $udpConnections = Get-NetUDPEndpoint | Where-Object { $_.RemoteAddress -notmatch "^(127|::1|192\.168|10\.)" }
+    foreach ($conn in $udpConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            if ($ipCounts[$ip] -ge $udpFloodThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor DNS flood attempts by mischievous spirits
+function Monitor-DNSFlood {
+    $dnsConnections = Get-NetTCPConnection | Where-Object { $_.RemotePort -eq 53 }
+    foreach ($conn in $dnsConnections) {
+        $ip = $conn.RemoteAddress
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            if ($ipCounts[$ip] -ge $dnsRequestThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+}
+
+# Monitor and haunt general connections
+function Monitor-Connections {
+    $connections = Get-NetTCPConnection | Where-Object { $_.RemoteAddress -notmatch "^(127|::1|192\.168|10\.)" } |
+        Select-Object -ExpandProperty RemoteAddress -Unique
+
+    foreach ($ip in $connections) {
+        if ($ip -and -Not $ipCounts.ContainsKey($ip)) { 
+            $ipCounts[$ip] = 0 
+        }
+        if ($ip) {
+            $ipCounts[$ip]++
+
+            if ($ipCounts[$ip] -eq $individualIPThreshold) {
+                Log-BlockedIP -ip $ip
+                Block-IP -ip $ip
+            }
+        }
+    }
+
+    if ($connections.Count -ge $globalBlockThreshold) {
+        Write-Host "⚰️ High spooky connection count detected. Summoning global block."
+        try {
+            New-NetFirewallRule -DisplayName "Global Block - DDoS 👹" -Direction Inbound -Action Block -Enabled True
+            Write-Host "🕸️ Global block spell cast in Windows Firewall"
+        } catch {
+            Write-Host "⚠️ Error casting global block spell: $_"
+        }
+    }
+
+    Analyze-ConnectionPatterns -currentCount $connections.Count
+}
+
+function Analyze-ConnectionPatterns {
+    param ([int]$currentCount)
+    if ($previousConnectionCount -eq 0) {
+        $previousConnectionCount = $currentCount
+        return
+    }
+
+    $increasePercentage = (($currentCount - $previousConnectionCount) / $previousConnectionCount)
+
+    if ($increasePercentage -ge $patternThreshold) {
+        Write-Host "🎃 Possible spooky DDoS attack detected: increase of $([math]::Round($increasePercentage * 100, 2))% in connections."
+
+        Log-BlockedIP -ip "Possible spooky attack detected: $increasePercentage"
+    }
+
+    $previousConnectionCount = $currentCount
+}
+
+# Main Loop - Patrolling for haunted connections
+$startTime = Get-Date
+while ($true) {
+    Monitor-Connections
+    Monitor-HTTPFlood
+    Monitor-UDPFlood
+    Monitor-DNSFlood
+    Start-Sleep -Seconds 1
+
+    if (((Get-Date) - $startTime) -ge $blockTimeWindow) {
+        Write-Host "🕯️ Resetting spooky IP counts. The ghosts are back to zero."
+        $ipCounts.Clear()
+        $startTime = Get-Date
+    }
+}
